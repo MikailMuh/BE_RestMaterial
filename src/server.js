@@ -2,9 +2,9 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { supabaseAdmin } from './config/supabase.js';
-
-//buat ngeroutes
 import authRoutes from './routes/auth.js';
+import categoryRoutes from './routes/categories.js';
+
 
 dotenv.config();
 
@@ -53,6 +53,8 @@ app.get('/api/health/supabase', async (req, res) => {
 
 // ini api routesnya
 app.use('/api/auth', authRoutes);
+// tambahin category routes
+app.use('/api/categories', categoryRoutes);
 
 app.use((req, res) => {
     res.status(404).json({eror: 'Route not found'});
