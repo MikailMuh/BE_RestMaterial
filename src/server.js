@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import { supabaseAdmin } from './config/supabase.js';
 import authRoutes from './routes/auth.js';
 import categoryRoutes from './routes/categories.js';
+import listingRoutes from './routes/listings.js';
 
 
 dotenv.config();
@@ -55,6 +56,8 @@ app.get('/api/health/supabase', async (req, res) => {
 app.use('/api/auth', authRoutes);
 // tambahin category routes
 app.use('/api/categories', categoryRoutes);
+// tambahin listing routes
+app.use('/api/listings', listingRoutes);
 
 app.use((req, res) => {
     res.status(404).json({eror: 'Route not found'});
@@ -62,6 +65,17 @@ app.use((req, res) => {
 
 app.use((err, req, res, next) => {
   console.error('[ERROR]', err);
+
+  // Validation error dari validator helper
+  if (err.name === 'ValidationError') {
+    return res.status(400).json({
+      error: 'Validation failed',
+      message: err.message,
+      field: err.field,
+    });
+  }
+
+  // Default error handler
   res.status(err.status || 500).json({
     error: err.message || 'Internal server error',
   });
