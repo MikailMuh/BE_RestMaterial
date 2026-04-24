@@ -24,7 +24,7 @@ export const supabaseAdmin = createClient(
 // @param {string} accessToken - The access token of the user for whom you want to create a client.
 
 export const getSupabaseForUser = (accessToken) => {
-    return CreateClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
         global: {
             headers: {
                 Authorization: `Bearer ${accessToken}`,
