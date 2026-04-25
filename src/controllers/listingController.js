@@ -350,3 +350,221 @@ export const createListing = async (req, res) => {
     listing: data,
   });
 };
+
+// ═══════════════════════════════════════════════════════════
+// PATCH /api/listings/:id
+// Update listing (AUTH required, seller only, milik sendiri)
+// Partial update — kirim field yg mau diubah aja
+// ═══════════════════════════════════════════════════════════
+export const updateListing = async (req, res) => {
+  const { id } = req.params;
+  validUUID(id, 'id');
+
+  const body = req.body;
+
+  // ─── Build update payload — hanya field yang di-kirim ───
+  // Ini pattern "selective update" — field yg `undefined` di-skip
+  const updates = {};
+
+  if (body.title !== undefined) {
+    updates.title = validString(body.title, 'title', { min: 5, max: 200 });
+  }
+  if (body.description !== undefined) {
+    updates.description = body.description
+      ? validString(body.description, 'description', { max: 2000 })
+      : null;
+  }
+  if (body.category_id !== undefined) {
+    updates.category_id = validUUID(body.category_id, 'category_id');
+
+    // Verify category exists
+    const { data: cat } = await supabaseAdmin
+      .from('categories')
+      .select('id')
+      .eq('id', updates.category_id)
+      .single();
+    if (!cat) {
+      throw new ValidationError(
+        `Category ${updates.category_id} tidak ditemukan`,
+        'category_id'
+      );
+    }
+  }
+  if (body.condition !== undefined) {
+    updates.condition = validEnum(body.condition, 'condition', VALID_CONDITIONS);
+  }
+  if (body.quantity !== undefined) {
+    updates.quantity = validNumber(body.quantity, 'quantity', { min: 0.001 });
+  }
+  if (body.unit !== undefined) {
+    updates.unit = validString(body.unit, 'unit', { max: 20 });
+  }
+  if (body.estimated_weight_kg !== undefined) {
+    updates.estimated_weight_kg = validNumber(
+      body.estimated_weight_kg,
+      'estimated_weight_kg',
+      { min: 0 }
+    );
+  }
+  if (body.price_per_unit !== undefined) {
+    updates.price_per_unit = validNumber(body.price_per_unit, 'price_per_unit', {
+      min: 0,
+    });
+  }
+  if (body.address !== undefined) {
+    updates.address = validString(body.address, 'address', {
+      min: 5,
+      max: 500,
+    });
+  }
+  if (body.city !== undefined) {
+    updates.city = validString(body.city, 'city', { max: 100 });
+  }
+  if (body.province !== undefined) {
+    updates.province = validString(body.province, 'province', { max: 100 });
+  }
+  if (body.latitude !== undefined) {
+    updates.latitude = body.latitude
+      ? validNumber(body.latitude, 'latitude', { min: -90, max: 90 })
+      : null;
+  }
+  if (body.longitude !== undefined) {
+    updates.longitude = body.longitude
+      ? validNumber(body.longitude, 'longitude', { min: -180, max: 180 })
+      : null;
+  }
+  if (body.delivery_available !== undefined) {
+    updates.delivery_available = Boolean(body.delivery_available);
+  }
+
+  // ─── Nothing to update ───
+  if (Object.keys(updates).length === 0) {
+    throw new ValidationError(
+      'Minimal 1 field harus di-update',
+      'body'
+    );
+  }
+
+  // ─── Execute update pake user context (RLS enforce ownership) ───
+  // RLS policy 'listings_seller_update' cek: USING (auth.uid() = seller_id)
+  // Jadi kalo user coba update listing orang lain, affected rows = 0
+  const { data, error } = await req.supabase
+    .from('listings')
+    .update(updates)
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (error) {
+    // RLS block atau listing gak ada → error PGRST116 ("no rows")
+    if (error.code === 'PGRST116') {
+      return res.status(404).json({
+        error: 'Not found',
+        message:
+          'Listing tidak ditemukan atau bukan milik lu',
+      });
+    }
+    console.error('[updateListing DB error]', error);
+    throw error;
+  }
+
+  res.json({
+    message: 'Listing berhasil diupdate',
+    listing: data,
+  });
+};
+
+// ═══════════════════════════════════════════════════════════
+// PATCH /api/listings/:id/status
+// Change listing status (AUTH required, seller only, milik sendiri)
+// Dipake buat: pause listing (AVAILABLE → INACTIVE), re-activate, dll
+// ═══════════════════════════════════════════════════════════
+export const updateListingStatus = async (req, res) => {
+  const { id } = req.params;
+  validUUID(id, 'id');
+
+  const { status } = req.body;
+  validEnum(required(status, 'status'), 'status', VALID_STATUSES);
+
+  // ─── Business rule: seller gak boleh ubah ke SOLD manual ───
+  // SOLD harus lewat transaction flow (nanti di Step 7)
+  if (status === 'SOLD') {
+    return res.status(400).json({
+      error: 'Forbidden status change',
+      message:
+        'Status SOLD otomatis diset waktu transaksi selesai. Gak bisa manual.',
+    });
+  }
+
+  // ─── Update pake user context ───
+  const { data, error } = await req.supabase
+    .from('listings')
+    .update({ status })
+    .eq('id', id)
+    .select('id, title, status, updated_at')
+    .single();
+
+  if (error) {
+    if (error.code === 'PGRST116') {
+      return res.status(404).json({
+        error: 'Not found',
+        message: 'Listing tidak ditemukan atau bukan milik lu',
+      });
+    }
+    throw error;
+  }
+
+  res.json({
+    message: `Status berhasil diubah ke ${status}`,
+    listing: data,
+  });
+};
+
+// ═══════════════════════════════════════════════════════════
+// DELETE /api/listings/:id
+// Delete listing (AUTH required, seller only, milik sendiri)
+// Cascade: listing_photos otomatis ke-hapus (ON DELETE CASCADE)
+// ═══════════════════════════════════════════════════════════
+export const deleteListing = async (req, res) => {
+  const { id } = req.params;
+  validUUID(id, 'id');
+
+  // ─── Business rule: gak boleh hapus kalo ada transaksi aktif ───
+  // Transaksi dengan status PENDING/ACCEPTED/PAID/READY_FOR_HANDOVER
+  // berarti lagi proses jual-beli. Hapus bisa bikin data inconsistent.
+  const { data: activeTxs } = await supabaseAdmin
+    .from('transactions')
+    .select('id, status')
+    .eq('listing_id', id)
+    .in('status', ['PENDING', 'ACCEPTED', 'PAID', 'READY_FOR_HANDOVER']);
+
+  if (activeTxs && activeTxs.length > 0) {
+    return res.status(409).json({
+      error: 'Conflict',
+      message: `Listing tidak bisa dihapus karena ada ${activeTxs.length} transaksi aktif. Batalkan atau selesaikan transaksi dulu.`,
+    });
+  }
+
+  // ─── Delete pake user context (RLS enforce ownership) ───
+  const { data, error } = await req.supabase
+    .from('listings')
+    .delete()
+    .eq('id', id)
+    .select('id, title')
+    .single();
+
+  if (error) {
+    if (error.code === 'PGRST116') {
+      return res.status(404).json({
+        error: 'Not found',
+        message: 'Listing tidak ditemukan atau bukan milik lu',
+      });
+    }
+    throw error;
+  }
+
+  res.json({
+    message: `Listing "${data.title}" berhasil dihapus`,
+    deleted_id: data.id,
+  });
+};

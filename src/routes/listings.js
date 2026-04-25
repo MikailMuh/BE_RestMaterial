@@ -7,25 +7,29 @@ import {
   getMyListings,
   getListingById,
   createListing,
+  updateListing,          // ← baru
+  updateListingStatus,    // ← baru
+  deleteListing,          // ← baru
 } from '../controllers/listingController.js';
 
 const router = Router();
 
 // ─── PUBLIC ───
-// GET /api/listings           → browse
-// GET /api/listings/:id       → detail
-// ⚠️ /me HARUS di atas /:id biar gak ke-match sebagai UUID
 router.get('/', asyncHandler(getAllListings));
 router.get('/me', requireAuth, asyncHandler(getMyListings));
 router.get('/:id', asyncHandler(getListingById));
 
-// ─── AUTH ───
-// POST /api/listings → create (SELLER/BOTH only)
+// ─── AUTH — SELLER/BOTH only ───
 router.post(
   '/',
   requireAuth,
   requireRole('SELLER', 'BOTH'),
   asyncHandler(createListing)
 );
+
+// ─── AUTH — owner only (enforced by RLS + controller) ───
+router.patch('/:id', requireAuth, asyncHandler(updateListing));
+router.patch('/:id/status', requireAuth, asyncHandler(updateListingStatus));
+router.delete('/:id', requireAuth, asyncHandler(deleteListing));
 
 export default router;
