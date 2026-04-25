@@ -1,5 +1,6 @@
 // src/controllers/listingController.js
 import { supabaseAdmin } from '../config/supabase.js';
+import { v4 as uuidv4 } from 'uuid';
 import {
   required,
   validNumber,
@@ -568,3 +569,259 @@ export const deleteListing = async (req, res) => {
     deleted_id: data.id,
   });
 };
+
+// ═══════════════════════════════════════════════════════════
+// POST /api/listings/:id/photos
+// Upload 1+ foto ke Supabase Storage, simpen URL ke listing_photos
+// AUTH required, owner only
+// Field: 'photos' (multipart, max 5 files, max 5MB each)
+// ═══════════════════════════════════════════════════════════
+
+export const uploadListingPhotos = async (req, res) => {
+  const { id } = req.params;
+  validUUID(id, 'id');
+
+  // ─── Validate file ada ───
+  if (!req.files || req.files.length === 0) {
+    throw new ValidationError(
+      'Minimal 1 foto harus di-upload (field: photos)',
+      'photos'
+    );
+  }
+
+  // ─── Verify ownership listing ───
+  // Pake supabaseAdmin biar liat semua data, tapi cek seller_id manual.
+  // Alternatif: pake req.supabase + RLS, tapi error message jadi kurang clear.
+  const { data: listing, error: listingErr } = await supabaseAdmin
+    .from('listings')
+    .select('id, seller_id, title')
+    .eq('id', id)
+    .single();
+
+  if (listingErr || !listing) {
+    return res.status(404).json({
+      error: 'Not found',
+      message: `Listing ${id} tidak ditemukan`,
+    });
+  }
+
+  if (listing.seller_id !== req.user.id) {
+    return res.status(403).json({
+      error: 'Forbidden',
+      message: 'Lu cuma bisa upload foto ke listing milik sendiri',
+    });
+  }
+
+  // ─── Cek jumlah foto existing biar gak over limit ───
+  const { count: existingCount } = await supabaseAdmin
+    .from('listing_photos')
+    .select('id', { count: 'exact', head: true })
+    .eq('listing_id', id);
+
+  const MAX_PHOTOS_PER_LISTING = 10;
+  if ((existingCount || 0) + req.files.length > MAX_PHOTOS_PER_LISTING) {
+    return res.status(400).json({
+      error: 'Too many photos',
+      message: `Maksimal ${MAX_PHOTOS_PER_LISTING} foto per listing. Sekarang ada ${existingCount}, mau tambah ${req.files.length}.`,
+    });
+  }
+
+  // ─── Upload ke Supabase Storage ───
+  // Path convention: <listing_id>/<random_uuid>.<ext>
+  // Random filename biar gak collision kalo user upload nama file sama
+  const uploadedUrls = [];
+  const errors = [];
+
+  for (let i = 0; i < req.files.length; i++) {
+    const file = req.files[i];
+
+    // Extract extension dari MIME (jpeg → jpg, png → png, webp → webp)
+    const extMap = {
+      'image/jpeg': 'jpg',
+      'image/png': 'png',
+      'image/webp': 'webp',
+    };
+    const ext = extMap[file.mimetype] || 'jpg';
+    const filename = `${uuidv4()}.${ext}`;
+    const path = `${id}/${filename}`;
+
+    // Upload pake user context (req.supabase) biar Storage RLS apply
+    const { data: uploadData, error: uploadErr } = await req.supabase.storage
+      .from('listing-photos')
+      .upload(path, file.buffer, {
+        contentType: file.mimetype,
+        cacheControl: '3600', // browser cache 1 jam
+        upsert: false,
+      });
+
+    if (uploadErr) {
+      console.error('[Upload error]', file.originalname, uploadErr);
+      errors.push({
+        file: file.originalname,
+        error: uploadErr.message,
+      });
+      continue;
+    }
+
+    // Generate public URL
+    const { data: urlData } = supabaseAdmin.storage
+      .from('listing-photos')
+      .getPublicUrl(uploadData.path);
+
+    uploadedUrls.push({
+      path: uploadData.path,
+      url: urlData.publicUrl,
+      order_index: (existingCount || 0) + i,
+    });
+  }
+
+  // ─── Kalo semua gagal upload ───
+  if (uploadedUrls.length === 0) {
+    return res.status(500).json({
+      error: 'Upload failed',
+      message: 'Tidak ada foto yang berhasil di-upload',
+      details: errors,
+    });
+  }
+
+  // ─── Insert ke listing_photos ───
+  // Foto pertama yg di-upload jadi primary KALAU listing belom punya foto
+  const isFirstUpload = (existingCount || 0) === 0;
+  const photosToInsert = uploadedUrls.map((p, idx) => ({
+    listing_id: id,
+    url: p.url,
+    order_index: p.order_index,
+    is_primary: isFirstUpload && idx === 0, // foto pertama dari batch pertama = primary
+  }));
+
+  const { data: photos, error: insertErr } = await req.supabase
+    .from('listing_photos')
+    .insert(photosToInsert)
+    .select();
+
+  if (insertErr) {
+    // Rollback storage uploads kalo DB insert fail
+    console.error('[DB insert error]', insertErr);
+    for (const p of uploadedUrls) {
+      await supabaseAdmin.storage.from('listing-photos').remove([p.path]);
+    }
+    return res.status(500).json({
+      error: 'Database error',
+      message: insertErr.message,
+    });
+  }
+
+  res.status(201).json({
+    message: `${photos.length} foto berhasil di-upload`,
+    photos,
+    failed: errors.length > 0 ? errors : undefined,
+  });
+};
+
+// ═══════════════════════════════════════════════════════════
+// DELETE /api/listings/:id/photos/:photoId
+// Delete 1 foto specific (dari Storage + DB)
+// AUTH required, owner only
+// ═══════════════════════════════════════════════════════════
+export const deleteListingPhoto = async (req, res) => {
+  const { id, photoId } = req.params;
+  validUUID(id, 'id');
+  validUUID(photoId, 'photoId');
+
+  // ─── Verify ownership ───
+  const { data: listing } = await supabaseAdmin
+    .from('listings')
+    .select('seller_id')
+    .eq('id', id)
+    .single();
+
+  if (!listing) {
+    return res.status(404).json({
+      error: 'Not found',
+      message: 'Listing tidak ditemukan',
+    });
+  }
+
+  if (listing.seller_id !== req.user.id) {
+    return res.status(403).json({
+      error: 'Forbidden',
+      message: 'Lu cuma bisa hapus foto listing milik sendiri',
+    });
+  }
+
+  // ─── Get photo URL buat extract storage path ───
+  const { data: photo, error: photoErr } = await supabaseAdmin
+    .from('listing_photos')
+    .select('id, url, is_primary')
+    .eq('id', photoId)
+    .eq('listing_id', id)
+    .single();
+
+  if (photoErr || !photo) {
+    return res.status(404).json({
+      error: 'Not found',
+      message: 'Foto tidak ditemukan',
+    });
+  }
+
+  // ─── Extract storage path dari public URL ───
+  // URL: https://xxx.supabase.co/storage/v1/object/public/listing-photos/<listing_id>/<filename>
+  // Path yg kita butuh: <listing_id>/<filename>
+  const urlParts = photo.url.split('/listing-photos/');
+  const storagePath = urlParts[1];
+
+  if (!storagePath) {
+    return res.status(500).json({
+      error: 'Invalid photo URL',
+      message: 'Cannot extract storage path from URL',
+    });
+  }
+
+  // ─── Delete dari Storage ───
+  const { error: storageErr } = await supabaseAdmin.storage
+    .from('listing-photos')
+    .remove([storagePath]);
+
+  if (storageErr) {
+    console.error('[Storage delete error]', storageErr);
+    // Lanjut hapus DB record meski Storage delete gagal (orphan file di-handle nanti)
+  }
+
+  // ─── Delete dari DB ───
+  const { error: dbErr } = await req.supabase
+    .from('listing_photos')
+    .delete()
+    .eq('id', photoId);
+
+  if (dbErr) {
+    return res.status(500).json({
+      error: 'Database error',
+      message: dbErr.message,
+    });
+  }
+
+  // ─── Kalo yg dihapus adalah primary, promote foto pertama jadi primary ───
+  if (photo.is_primary) {
+    const { data: nextPhoto } = await supabaseAdmin
+      .from('listing_photos')
+      .select('id')
+      .eq('listing_id', id)
+      .order('order_index', { ascending: true })
+      .limit(1)
+      .single();
+
+    if (nextPhoto) {
+      await supabaseAdmin
+        .from('listing_photos')
+        .update({ is_primary: true })
+        .eq('id', nextPhoto.id);
+    }
+  }
+
+  res.json({
+    message: 'Foto berhasil dihapus',
+    deleted_id: photoId,
+  });
+};
+
+
