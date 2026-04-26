@@ -5,6 +5,7 @@ import { supabaseAdmin } from './config/supabase.js';
 import authRoutes from './routes/auth.js';
 import categoryRoutes from './routes/categories.js';
 import listingRoutes from './routes/listings.js';
+import conversationRoutes from './routes/conversations.js';
 
 
 dotenv.config();
@@ -58,6 +59,8 @@ app.use('/api/auth', authRoutes);
 app.use('/api/categories', categoryRoutes);
 // tambahin listing routes
 app.use('/api/listings', listingRoutes);
+// buat conversation routes
+app.use('/api/conversations', conversationRoutes);
 
 app.use((req, res) => {
     res.status(404).json({eror: 'Route not found'});
