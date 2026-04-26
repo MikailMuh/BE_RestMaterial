@@ -6,6 +6,7 @@ import authRoutes from './routes/auth.js';
 import categoryRoutes from './routes/categories.js';
 import listingRoutes from './routes/listings.js';
 import conversationRoutes from './routes/conversations.js';
+import userRoutes from './routes/users.js';
 
 
 dotenv.config();
@@ -61,6 +62,8 @@ app.use('/api/categories', categoryRoutes);
 app.use('/api/listings', listingRoutes);
 // buat conversation routes
 app.use('/api/conversations', conversationRoutes);
+// buat user routes
+app.use('/api/users', userRoutes);
 
 app.use((req, res) => {
     res.status(404).json({eror: 'Route not found'});
