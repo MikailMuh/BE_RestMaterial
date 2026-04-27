@@ -1,3 +1,10 @@
-node_modules
 .env
-*.log
+node_modules
+.log
+build
+dist
+.DS_Store
+.vscode
+.claude
+package-lock.json
+
