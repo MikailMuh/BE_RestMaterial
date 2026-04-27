@@ -6,5 +6,5 @@ dist
 .DS_Store
 .vscode
 .claude
-package-lock.json
+
 
