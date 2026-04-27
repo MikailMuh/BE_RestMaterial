@@ -24,6 +24,43 @@ const VALID_TRANSACTION_STATUSES = [
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
 
+// tambahan helper buat accept and reject
+// ─── Helper: restore listing quantity setelah reject/cancel ───
+const restoreListingQuantity = async (listingId, qtyToRestore) => {
+  const { data: listing, error: fetchErr } = await supabaseAdmin
+    .from('listings')
+    .select('id, quantity, status')
+    .eq('id', listingId)
+    .single();
+
+  if (fetchErr || !listing) {
+    console.error('[restoreListing] not found:', listingId);
+    return { error: fetchErr || new Error('Listing not found') };
+  }
+
+  // Skip kalo listing udah SOLD/INACTIVE (gak relevan lagi)
+  if (['SOLD', 'INACTIVE'].includes(listing.status)) {
+    return { skipped: true };
+  }
+
+  const newQuantity = Number(listing.quantity) + Number(qtyToRestore);
+
+  const { error: updateErr } = await supabaseAdmin
+    .from('listings')
+    .update({
+      quantity: newQuantity,
+      status: 'AVAILABLE',
+    })
+    .eq('id', listingId);
+
+  if (updateErr) {
+    console.error('[restoreListing] update failed:', updateErr);
+    return { error: updateErr };
+  }
+
+  return { success: true, newQuantity };
+};
+
 // ═══════════════════════════════════════════════════════════
 // POST /api/transactions
 // Create new order (BUYER initiating)
@@ -321,5 +358,206 @@ export const getTransactionById = async (req, res) => {
 
   res.json({
     transaction: { ...data, my_role: myRole },
+  });
+};
+
+// ═══════════════════════════════════════════════════════════
+// PATCH /api/transactions/:id/accept
+// SELLER accept order — PENDING → ACCEPTED
+// ═══════════════════════════════════════════════════════════
+export const acceptTransaction = async (req, res) => {
+  const { id } = req.params;
+  validUUID(id, 'id');
+
+  const { data: tx } = await req.supabase
+    .from('transactions')
+    .select('id, status, seller_id, buyer_id, listing_id, quantity')
+    .eq('id', id)
+    .maybeSingle();
+
+  if (!tx) {
+    return res.status(404).json({
+      error: 'Not found',
+      message: 'Transaction tidak ditemukan atau lu bukan participant',
+    });
+  }
+
+  if (tx.seller_id !== req.user.id) {
+    return res.status(403).json({
+      error: 'Forbidden',
+      message: 'Cuma seller yang bisa accept order',
+    });
+  }
+
+  if (tx.status !== 'PENDING') {
+    return res.status(400).json({
+      error: 'Invalid state transition',
+      message: `Status saat ini '${tx.status}'. Cuma transaction PENDING yang bisa di-accept.`,
+    });
+  }
+
+  const { data: updated, error } = await req.supabase
+    .from('transactions')
+    .update({
+      status: 'ACCEPTED',
+      accepted_at: new Date().toISOString(),
+    })
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (error) throw error;
+
+  res.json({
+    message: 'Order accepted. Buyer bisa lanjut bayar.',
+    transaction: updated,
+  });
+};
+
+// ═══════════════════════════════════════════════════════════
+// PATCH /api/transactions/:id/reject
+// SELLER reject order — PENDING → REJECTED + restore stok
+// Body: { reason? }
+// ═══════════════════════════════════════════════════════════
+export const rejectTransaction = async (req, res) => {
+  const { id } = req.params;
+  validUUID(id, 'id');
+
+  const { reason } = req.body;
+  const validatedReason = reason
+    ? validString(reason, 'reason', { max: 500 })
+    : null;
+
+  const { data: tx } = await req.supabase
+    .from('transactions')
+    .select('id, status, seller_id, buyer_id, listing_id, quantity, buyer_message')
+    .eq('id', id)
+    .maybeSingle();
+
+  if (!tx) {
+    return res.status(404).json({
+      error: 'Not found',
+      message: 'Transaction tidak ditemukan atau lu bukan participant',
+    });
+  }
+
+  if (tx.seller_id !== req.user.id) {
+    return res.status(403).json({
+      error: 'Forbidden',
+      message: 'Cuma seller yang bisa reject order',
+    });
+  }
+
+  if (tx.status !== 'PENDING') {
+    return res.status(400).json({
+      error: 'Invalid state transition',
+      message: `Status saat ini '${tx.status}'. Reject hanya valid untuk PENDING. Kalo udah ACCEPTED, harus pake cancel.`,
+    });
+  }
+
+  const updatePayload = {
+    status: 'REJECTED',
+    cancelled_at: new Date().toISOString(),
+  };
+
+  if (validatedReason) {
+    const prefix = tx.buyer_message ? `${tx.buyer_message}\n\n` : '';
+    updatePayload.buyer_message = `${prefix}[REJECTED by seller]: ${validatedReason}`;
+  }
+
+  const { data: updated, error } = await req.supabase
+    .from('transactions')
+    .update(updatePayload)
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (error) throw error;
+
+  // Restore stok ke listing
+  const restoreResult = await restoreListingQuantity(tx.listing_id, tx.quantity);
+  if (restoreResult.error) {
+    console.warn('[rejectTransaction] restore qty failed:', restoreResult.error);
+  }
+
+  res.json({
+    message: 'Order rejected. Stok dikembalikan ke listing.',
+    transaction: updated,
+  });
+};
+
+// ═══════════════════════════════════════════════════════════
+// PATCH /api/transactions/:id/cancel
+// Cancel order — PENDING/ACCEPTED → CANCELLED + restore stok
+// Bisa dari buyer ATAU seller
+// Body: { reason? }
+// ═══════════════════════════════════════════════════════════
+export const cancelTransaction = async (req, res) => {
+  const { id } = req.params;
+  validUUID(id, 'id');
+
+  const { reason } = req.body;
+  const validatedReason = reason
+    ? validString(reason, 'reason', { max: 500 })
+    : null;
+
+  const { data: tx } = await req.supabase
+    .from('transactions')
+    .select('id, status, seller_id, buyer_id, listing_id, quantity, buyer_message')
+    .eq('id', id)
+    .maybeSingle();
+
+  if (!tx) {
+    return res.status(404).json({
+      error: 'Not found',
+      message: 'Transaction tidak ditemukan atau lu bukan participant',
+    });
+  }
+
+  const isBuyer = tx.buyer_id === req.user.id;
+  const isSeller = tx.seller_id === req.user.id;
+
+  if (!isBuyer && !isSeller) {
+    return res.status(403).json({
+      error: 'Forbidden',
+      message: 'Cuma participant yang bisa cancel',
+    });
+  }
+
+  if (!['PENDING', 'ACCEPTED'].includes(tx.status)) {
+    return res.status(400).json({
+      error: 'Invalid state transition',
+      message: `Status saat ini '${tx.status}'. Cancel hanya valid untuk PENDING atau ACCEPTED.`,
+    });
+  }
+
+  const cancelledBy = isBuyer ? 'buyer' : 'seller';
+  const updatePayload = {
+    status: 'CANCELLED',
+    cancelled_at: new Date().toISOString(),
+  };
+
+  if (validatedReason) {
+    const prefix = tx.buyer_message ? `${tx.buyer_message}\n\n` : '';
+    updatePayload.buyer_message = `${prefix}[CANCELLED by ${cancelledBy}]: ${validatedReason}`;
+  }
+
+  const { data: updated, error } = await req.supabase
+    .from('transactions')
+    .update(updatePayload)
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (error) throw error;
+
+  const restoreResult = await restoreListingQuantity(tx.listing_id, tx.quantity);
+  if (restoreResult.error) {
+    console.warn('[cancelTransaction] restore qty failed:', restoreResult.error);
+  }
+
+  res.json({
+    message: `Order cancelled by ${cancelledBy}. Stok dikembalikan.`,
+    transaction: updated,
   });
 };
