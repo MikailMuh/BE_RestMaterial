@@ -8,6 +8,8 @@ import listingRoutes from './routes/listings.js';
 import conversationRoutes from './routes/conversations.js';
 import userRoutes from './routes/users.js';
 import transactionRoutes from './routes/transactions.js';
+import reviewRoutes from './routes/reviews.js';
+import impactRoutes from './routes/impact.js';
 
 
 dotenv.config();
@@ -67,6 +69,10 @@ app.use('/api/conversations', conversationRoutes);
 app.use('/api/users', userRoutes);
 // buat transaction routes
 app.use('/api/transactions', transactionRoutes);
+// buat review routes
+app.use('/api/reviews', reviewRoutes);
+// buat impact routes
+app.use('/api/impact', impactRoutes);
 
 app.use((req, res) => {
     res.status(404).json({eror: 'Route not found'});

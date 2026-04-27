@@ -7,6 +7,7 @@ import {
   updateMyProfile,
   getPublicProfile,
 } from '../controllers/userController.js';
+import { getUserReviews } from '../controllers/reviewController.js';
 
 const router = Router();
 
@@ -17,4 +18,6 @@ router.patch('/me', requireAuth, asyncHandler(updateMyProfile));
 // ─── Public profile by ID ───
 router.get('/:id', asyncHandler(getPublicProfile));
 
+// buat review
+router.get('/:id/reviews', asyncHandler(getUserReviews));
 export default router;
