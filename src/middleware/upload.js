@@ -49,6 +49,39 @@ export const uploadPhotos = multer({
   },
 });
 
+// buat upload payment
+// Tambahin di bawah uploadPhotos export:
+
+// Multer instance khusus payment proof — single file, terima image+PDF
+const PAYMENT_ALLOWED_MIMES = [
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'application/pdf',
+];
+
+const paymentFileFilter = (req, file, cb) => {
+  if (!PAYMENT_ALLOWED_MIMES.includes(file.mimetype)) {
+    return cb(
+      new ValidationError(
+        `File '${file.originalname}' bukan format yang didukung. Gunakan: JPEG, PNG, WebP, atau PDF`,
+        'payment_proof'
+      ),
+      false
+    );
+  }
+  cb(null, true);
+};
+
+export const uploadPaymentProof = multer({
+  storage: multer.memoryStorage(),
+  fileFilter: paymentFileFilter,
+  limits: {
+    fileSize: MAX_FILE_SIZE, // reuse 5MB limit
+    files: 1,
+  },
+});
+
 /**
  * Multer error handler middleware — translate multer errors jadi JSON response.
  * Pasang DI BAWAH multer middleware di route stack.

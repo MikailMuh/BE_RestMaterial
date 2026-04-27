@@ -1,5 +1,6 @@
 // src/controllers/transactionController.js
 import { supabaseAdmin } from '../config/supabase.js';
+import { v4 as uuidv4 } from 'uuid';
 import {
   required,
   validString,
@@ -559,5 +560,248 @@ export const cancelTransaction = async (req, res) => {
   res.json({
     message: `Order cancelled by ${cancelledBy}. Stok dikembalikan.`,
     transaction: updated,
+  });
+};
+
+// ═══════════════════════════════════════════════════════════
+// POST /api/transactions/:id/payment
+// BUYER upload bukti payment — ACCEPTED → PAID
+// Multipart form field: 'payment_proof' (1 file, max 5MB)
+// ═══════════════════════════════════════════════════════════
+export const uploadPaymentProof = async (req, res) => {
+  const { id } = req.params;
+  validUUID(id, 'id');
+
+  // ─── Validate file ada ───
+  if (!req.file) {
+    throw new ValidationError(
+      'Bukti pembayaran wajib di-upload (field: payment_proof)',
+      'payment_proof'
+    );
+  }
+
+  // ─── Fetch transaction ───
+  const { data: tx } = await req.supabase
+    .from('transactions')
+    .select('id, status, buyer_id, seller_id, listing_id')
+    .eq('id', id)
+    .maybeSingle();
+
+  if (!tx) {
+    return res.status(404).json({
+      error: 'Not found',
+      message: 'Transaction tidak ditemukan atau lu bukan participant',
+    });
+  }
+
+  // ─── Authorization: BUYER only ───
+  if (tx.buyer_id !== req.user.id) {
+    return res.status(403).json({
+      error: 'Forbidden',
+      message: 'Cuma buyer yang bisa upload bukti bayar',
+    });
+  }
+
+  // ─── State validation: harus ACCEPTED ───
+  if (tx.status !== 'ACCEPTED') {
+    return res.status(400).json({
+      error: 'Invalid state transition',
+      message: `Status saat ini '${tx.status}'. Upload bukti bayar hanya valid saat ACCEPTED.`,
+    });
+  }
+
+  // ─── Upload ke Supabase Storage ───
+  // Path: <buyer_id>/<transaction_id>/<random_uuid>.<ext>
+  // Sesuai storage policy yg udah di-setup
+  const extMap = {
+    'image/jpeg': 'jpg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+    'application/pdf': 'pdf',
+  };
+  const ext = extMap[req.file.mimetype] || 'jpg';
+  const filename = `${uuidv4()}.${ext}`;
+  const storagePath = `${req.user.id}/${id}/${filename}`;
+
+  const { data: uploadData, error: uploadErr } = await req.supabase.storage
+    .from('payment-proofs')
+    .upload(storagePath, req.file.buffer, {
+      contentType: req.file.mimetype,
+      cacheControl: '3600',
+      upsert: false,
+    });
+
+  if (uploadErr) {
+    console.error('[uploadPaymentProof]', uploadErr);
+    return res.status(500).json({
+      error: 'Upload failed',
+      message: uploadErr.message,
+    });
+  }
+
+  // ─── Generate signed URL (private bucket — bukan public URL) ───
+  // Signed URL valid 7 hari, untuk seller liat bukti
+  const { data: signedUrlData, error: urlErr } = await supabaseAdmin.storage
+    .from('payment-proofs')
+    .createSignedUrl(uploadData.path, 60 * 60 * 24 * 7); // 7 days
+
+  if (urlErr) {
+    console.error('[signedUrl]', urlErr);
+    return res.status(500).json({
+      error: 'URL generation failed',
+      message: urlErr.message,
+    });
+  }
+
+  // ─── Update transaction ───
+  const { data: updated, error } = await req.supabase
+    .from('transactions')
+    .update({
+      status: 'PAID',
+      paid_at: new Date().toISOString(),
+      payment_proof_url: signedUrlData.signedUrl,
+    })
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (error) {
+    // Rollback storage upload kalo DB fail
+    await supabaseAdmin.storage.from('payment-proofs').remove([uploadData.path]);
+    throw error;
+  }
+
+  res.json({
+    message: 'Bukti bayar berhasil di-upload. Tunggu seller siapin barang.',
+    transaction: updated,
+  });
+};
+
+// ═══════════════════════════════════════════════════════════
+// PATCH /api/transactions/:id/ready
+// SELLER mark ready — PAID → READY_FOR_HANDOVER
+// ═══════════════════════════════════════════════════════════
+export const markReadyForHandover = async (req, res) => {
+  const { id } = req.params;
+  validUUID(id, 'id');
+
+  const { data: tx } = await req.supabase
+    .from('transactions')
+    .select('id, status, seller_id')
+    .eq('id', id)
+    .maybeSingle();
+
+  if (!tx) {
+    return res.status(404).json({
+      error: 'Not found',
+      message: 'Transaction tidak ditemukan atau lu bukan participant',
+    });
+  }
+
+  if (tx.seller_id !== req.user.id) {
+    return res.status(403).json({
+      error: 'Forbidden',
+      message: 'Cuma seller yang bisa mark ready',
+    });
+  }
+
+  if (tx.status !== 'PAID') {
+    return res.status(400).json({
+      error: 'Invalid state transition',
+      message: `Status saat ini '${tx.status}'. Mark ready hanya valid saat PAID.`,
+    });
+  }
+
+  const { data: updated, error } = await req.supabase
+    .from('transactions')
+    .update({ status: 'READY_FOR_HANDOVER' })
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (error) throw error;
+
+  res.json({
+    message: 'Barang siap di-handover. Buyer bisa pickup/terima delivery.',
+    transaction: updated,
+  });
+};
+
+// ═══════════════════════════════════════════════════════════
+// PATCH /api/transactions/:id/complete
+// BUYER confirm received — READY_FOR_HANDOVER → COMPLETED
+// Side effects:
+// - DB trigger 'transactions_snapshot_impact' auto-snapshot
+//   co2_saved & total_weight_kg
+// - Manual: update listing.status to SOLD (kalo gak ada stok lagi)
+// ═══════════════════════════════════════════════════════════
+export const completeTransaction = async (req, res) => {
+  const { id } = req.params;
+  validUUID(id, 'id');
+
+  const { data: tx } = await req.supabase
+    .from('transactions')
+    .select('id, status, buyer_id, listing_id, quantity')
+    .eq('id', id)
+    .maybeSingle();
+
+  if (!tx) {
+    return res.status(404).json({
+      error: 'Not found',
+      message: 'Transaction tidak ditemukan atau lu bukan participant',
+    });
+  }
+
+  if (tx.buyer_id !== req.user.id) {
+    return res.status(403).json({
+      error: 'Forbidden',
+      message: 'Cuma buyer yang bisa confirm complete',
+    });
+  }
+
+  if (tx.status !== 'READY_FOR_HANDOVER') {
+    return res.status(400).json({
+      error: 'Invalid state transition',
+      message: `Status saat ini '${tx.status}'. Complete hanya valid saat READY_FOR_HANDOVER.`,
+    });
+  }
+
+  // ─── Update status COMPLETED ───
+  // DB trigger 'transactions_snapshot_impact' otomatis fire:
+  //   - completed_at = NOW()
+  //   - co2_saved & total_weight_kg di-snapshot dari listing
+  const { data: updated, error } = await req.supabase
+    .from('transactions')
+    .update({ status: 'COMPLETED' })
+    .eq('id', id)
+    .select()
+    .single();
+
+  if (error) throw error;
+
+  // ─── Update listing.status to SOLD (kalo udah RESERVED) ───
+  // Listing yang status RESERVED artinya stok udah habis dari Step 7a.
+  // Setelah transaction COMPLETED, set ke SOLD (final state).
+  const { data: listing } = await supabaseAdmin
+    .from('listings')
+    .select('status')
+    .eq('id', tx.listing_id)
+    .single();
+
+  if (listing && listing.status === 'RESERVED') {
+    await supabaseAdmin
+      .from('listings')
+      .update({ status: 'SOLD' })
+      .eq('id', tx.listing_id);
+  }
+
+  res.json({
+    message: 'Transaction completed! Thanks for using Sisain 🌱',
+    transaction: updated,
+    impact: {
+      co2_saved_kg: updated.co2_saved,
+      weight_diverted_kg: updated.total_weight_kg,
+      note: 'Impact data ke-snapshot otomatis ke dashboard kamu.',
+    },
   });
 };
