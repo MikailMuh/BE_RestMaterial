@@ -11,7 +11,7 @@ import {
 } from '../utils/validator.js';
 
 // ─── Constants ─────────────────────────────────────────────
-const VALID_CONDITIONS = ['GRADE_A', 'GRADE_B', 'GRADE_C', 'GRADE_D'];
+const VALID_CONDITIONS = ['NEW_SURPLUS', 'PRELOVED', 'NEEDS_REPAIR'];
 const VALID_STATUSES = ['AVAILABLE', 'RESERVED', 'SOLD', 'INACTIVE'];
 const VALID_SORTS = ['newest', 'oldest', 'price_asc', 'price_desc'];
 
