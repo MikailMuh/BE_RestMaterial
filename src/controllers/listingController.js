@@ -753,8 +753,8 @@ export const deleteListingPhoto = async (req, res) => {
   const { data: photo, error: photoErr } = await supabaseAdmin
     .from('listing_photos')
     .select('id, url, is_primary')
-    .eq('id', photoId)
     .eq('listing_id', id)
+    .like('url', `%${photoId}%`)  // cari berdasarkan filename di URL
     .single();
 
   if (photoErr || !photo) {
@@ -788,7 +788,7 @@ export const deleteListingPhoto = async (req, res) => {
   }
 
   // ─── Delete dari DB ───
-  const { error: dbErr } = await req.supabase
+  const { error: dbErr } = await supabaseAdmin
     .from('listing_photos')
     .delete()
     .eq('id', photoId);
