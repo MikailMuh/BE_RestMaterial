@@ -96,8 +96,19 @@ app.use((err, req, res, next) => {
   });
 });
 
+// fixing bug in front end
+app.use(
+    cors({
+        origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+        methods: ['GET', 'POST', 'PATCH', 'DELETE'],
+        credentials: true,
+    })
+);
+
+
 // --- Start server ---
 app.listen(PORT, () => {
   console.log(`🚀 Server jalan di http://localhost:${PORT}`);
   console.log(`📊 Env: ${process.env.NODE_ENV || 'development'}`);
 });
+
