@@ -9,3 +9,4 @@ dist
 tokens.json
 test-login.js
 bulk-upload-photos.js
+.claude
