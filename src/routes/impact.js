@@ -1,20 +1,21 @@
 // src/routes/impact.js
-import { Router } from 'express';
-import { asyncHandler } from '../utils/asyncHandler.js';
-import { requireAuth } from '../middleware/auth.js';
+import express from 'express';
 import {
   getPlatformStats,
   getMyImpact,
   getLeaderboard,
+  getCategoryBreakdown,
 } from '../controllers/impactController.js';
+import { requireAuth } from '../middleware/auth.js';
 
-const router = Router();
+const router = express.Router();
 
-// Public — landing page stats
-router.get('/platform', asyncHandler(getPlatformStats));
-router.get('/leaderboard', asyncHandler(getLeaderboard));
+// PUBLIC routes
+router.get('/platform', getPlatformStats);
+router.get('/breakdown', getCategoryBreakdown);
+router.get('/leaderboard', getLeaderboard);
 
-// Auth — personal dashboard
-router.get('/me', requireAuth, asyncHandler(getMyImpact));
+// PRIVATE — require auth
+router.get('/me', requireAuth, getMyImpact);
 
 export default router;

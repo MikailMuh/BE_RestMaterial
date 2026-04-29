@@ -1,6 +1,25 @@
 // src/controllers/impactController.js
 import { supabaseAdmin } from '../config/supabase.js';
 import { validNumber } from '../utils/validator.js';
+import { asyncHandler } from '../utils/asyncHandler.js';
+
+// ═══════════════════════════════════════════════════════════
+// CATEGORY GROUPS MAPPING
+// Selaras dengan UI mockup FE - 11 group categories
+// ═══════════════════════════════════════════════════════════
+const CATEGORY_GROUPS = {
+  'Steel & Iron': ['rebar', 'steel-profile', 'iron-pipe'],
+  'Aluminium': ['aluminum-frame'],
+  'Concrete': ['cement', 'readymix', 'sand', 'gravel'],
+  'Wood & Plywood': ['solid-wood', 'plywood', 'wood-frame'],
+  'Bricks & Blocks': ['clay-brick', 'aac-block'],
+  'Ceramic & Granite': ['ceramic-tile', 'granite-tile', 'marble'],
+  'Glass': ['clear-glass'],
+  'Frames & Doors': ['door', 'roof-tile'],
+  'Pipes & Installation': ['pvc-pipe', 'electrical-cable', 'sanitary-fitting', 'toilet', 'sink'],
+  'Paints & Coatings': ['paint'],
+  'Others': ['gypsum', 'wallpaper'],
+};
 
 // ═══════════════════════════════════════════════════════════
 // GET /api/impact/platform
@@ -134,3 +153,128 @@ export const getLeaderboard = async (req, res) => {
     count: ranked.length,
   });
 };
+
+/// ═══════════════════════════════════════════════════════════
+// GET /api/impact/breakdown
+// CO2 saved breakdown by FE display category groups
+// PUBLIC — buat dashboard breakdown chart
+// ═══════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
+// GET /api/impact/breakdown
+// CO2 saved breakdown by FE display category groups
+// PUBLIC — buat dashboard breakdown chart
+// ═══════════════════════════════════════════════════════════
+export const getCategoryBreakdown = asyncHandler(async (req, res) => {
+  console.log('[getCategoryBreakdown] Starting...');
+
+  // Step 1: Get all completed transactions with co2_saved
+  const { data: transactions, error: txError } = await supabaseAdmin
+    .from('transactions')
+    .select('id, status, co2_saved, listing_id')
+    .gt('co2_saved', 0); // hanya yang punya co2_saved > 0
+
+  if (txError) {
+    console.error('[getCategoryBreakdown] Transaction query error:', txError);
+    return res.status(500).json({
+      error: 'Database error pada query transactions',
+      message: txError.message,
+      details: txError,
+    });
+  }
+
+  console.log(`[getCategoryBreakdown] Found ${transactions?.length || 0} transactions with co2_saved > 0`);
+
+  if (!transactions || transactions.length === 0) {
+    return res.json({
+      total_co2_saved_kg: 0,
+      total_transactions: 0,
+      breakdown: [],
+    });
+  }
+
+  // Step 2: Get unique listing IDs
+  const listingIds = [...new Set(transactions.map((tx) => tx.listing_id).filter(Boolean))];
+  console.log(`[getCategoryBreakdown] Unique listing IDs: ${listingIds.length}`);
+
+  // Step 3: Fetch listings dengan category info
+  const { data: listings, error: lError } = await supabaseAdmin
+    .from('listings')
+    .select('id, category_id, categories(slug, name)')
+    .in('id', listingIds);
+
+  if (lError) {
+    console.error('[getCategoryBreakdown] Listings query error:', lError);
+    return res.status(500).json({
+      error: 'Database error pada query listings',
+      message: lError.message,
+      details: lError,
+    });
+  }
+
+  console.log(`[getCategoryBreakdown] Found ${listings?.length || 0} listings`);
+
+  // Step 4: Map listing_id → category_slug
+  const listingToSlug = {};
+  for (const l of listings || []) {
+    const slug = l.categories?.slug;
+    if (slug) {
+      listingToSlug[l.id] = slug;
+    }
+  }
+
+  console.log(`[getCategoryBreakdown] Listings with valid slug: ${Object.keys(listingToSlug).length}`);
+
+  // Step 5: Initialize breakdown
+  const breakdown = {};
+  for (const groupName of Object.keys(CATEGORY_GROUPS)) {
+    breakdown[groupName] = 0;
+  }
+
+  // Step 6: Aggregate co2_saved per group
+  let totalCo2 = 0;
+
+  for (const tx of transactions) {
+    const co2 = parseFloat(tx.co2_saved) || 0;
+    if (co2 <= 0) continue;
+
+    const slug = listingToSlug[tx.listing_id];
+    if (!slug) {
+      console.log(`[getCategoryBreakdown] Skip tx ${tx.id} - no slug for listing ${tx.listing_id}`);
+      continue;
+    }
+
+    // Find which group this slug belongs to
+    let foundGroup = null;
+    for (const [groupName, slugs] of Object.entries(CATEGORY_GROUPS)) {
+      if (slugs.includes(slug)) {
+        foundGroup = groupName;
+        break;
+      }
+    }
+
+    if (foundGroup) {
+      breakdown[foundGroup] += co2;
+      totalCo2 += co2;
+    } else {
+      console.log(`[getCategoryBreakdown] Slug "${slug}" tidak ada di CATEGORY_GROUPS mapping`);
+    }
+  }
+
+  // Step 7: Convert to sorted array with percentage
+  const breakdownArray = Object.entries(breakdown)
+    .map(([category, co2_kg]) => ({
+      category,
+      co2_kg: Math.round(co2_kg * 100) / 100,
+      percentage: totalCo2 > 0 ? Math.round((co2_kg / totalCo2) * 1000) / 10 : 0,
+    }))
+    .filter((item) => item.co2_kg > 0)
+    .sort((a, b) => b.co2_kg - a.co2_kg);
+
+  console.log(`[getCategoryBreakdown] Final breakdown:`, breakdownArray);
+
+  res.json({
+    total_co2_saved_kg: Math.round(totalCo2 * 100) / 100,
+    total_transactions: transactions.length,
+    breakdown: breakdownArray,
+  });
+});
