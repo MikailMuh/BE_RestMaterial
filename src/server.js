@@ -11,55 +11,60 @@ import transactionRoutes from './routes/transactions.js';
 import reviewRoutes from './routes/reviews.js';
 import impactRoutes from './routes/impact.js';
 
-
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// ═══════════════════════════════════════════════════════════
+// CORS Configuration (single, multi-origin)
+// ═══════════════════════════════════════════════════════════
 const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:3000',
-  process.env.FRONTEND_URL,
+  'https://fe-restmaterial.vercel.app', // production FE (hardcode safety net)
+  process.env.FRONTEND_URL, // dari Railway env (bisa di-update tanpa redeploy code)
 ].filter(Boolean);
 
 app.use(
   cors({
     origin: (origin, callback) => {
+      // Allow requests dengan no origin (Postman, mobile apps, server-to-server)
       if (!origin) return callback(null, true);
-      
+
       if (allowedOrigins.includes(origin)) {
         callback(null, true);
       } else {
         console.warn(`[CORS blocked] origin: ${origin}`);
-        callback(new Error('Not allowed by CORS'));
+        callback(new Error(`Origin "${origin}" not allowed by CORS`));
       }
     },
     credentials: true,
+    methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
   })
 );
 
-app.use(
-    cors({
-        origin: process.env.FRONTEND_URL || 'http://localhost:5173',
-        credentials: true,
-    })
-);
-
-app.use(express.json({limit: '10mb'}));
+// ═══════════════════════════════════════════════════════════
+// Body Parsers
+// ═══════════════════════════════════════════════════════════
+app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
+// ═══════════════════════════════════════════════════════════
+// Health Check Routes
+// ═══════════════════════════════════════════════════════════
 app.get('/', (req, res) => {
-    res.json({
-        status: 'oke',
-        service: 'REST Material API',
-        timestamp: new Date().toISOString(),
-    });
+  res.json({
+    status: 'oke',
+    service: 'REST Material API',
+    timestamp: new Date().toISOString(),
+    cors_origins: allowedOrigins, // bantu debug — bisa dihapus nanti
+  });
 });
 
 app.get('/api/health/supabase', async (req, res) => {
   try {
-    // Query ringan ke tabel categories (harusnya udah ada seed data)
     const { data, error } = await supabaseAdmin
       .from('categories')
       .select('id, name')
@@ -79,27 +84,28 @@ app.get('/api/health/supabase', async (req, res) => {
   }
 });
 
-// ini api routesnya
+// ═══════════════════════════════════════════════════════════
+// API Routes
+// ═══════════════════════════════════════════════════════════
 app.use('/api/auth', authRoutes);
-// tambahin category routes
 app.use('/api/categories', categoryRoutes);
-// tambahin listing routes
 app.use('/api/listings', listingRoutes);
-// buat conversation routes
 app.use('/api/conversations', conversationRoutes);
-// buat user routes
 app.use('/api/users', userRoutes);
-// buat transaction routes
 app.use('/api/transactions', transactionRoutes);
-// buat review routes
 app.use('/api/reviews', reviewRoutes);
-// buat impact routes
 app.use('/api/impact', impactRoutes);
 
+// ═══════════════════════════════════════════════════════════
+// 404 Handler
+// ═══════════════════════════════════════════════════════════
 app.use((req, res) => {
-    res.status(404).json({eror: 'Route not found'});
+  res.status(404).json({ error: 'Route not found' });
 });
 
+// ═══════════════════════════════════════════════════════════
+// Global Error Handler
+// ═══════════════════════════════════════════════════════════
 app.use((err, req, res, next) => {
   console.error('[ERROR]', err);
 
@@ -118,19 +124,11 @@ app.use((err, req, res, next) => {
   });
 });
 
-// fixing bug in front end
-app.use(
-    cors({
-        origin: process.env.FRONTEND_URL || 'http://localhost:5173',
-        methods: ['GET', 'POST', 'PATCH', 'DELETE'],
-        credentials: true,
-    })
-);
-
-
-// --- Start server ---
+// ═══════════════════════════════════════════════════════════
+// Start Server
+// ═══════════════════════════════════════════════════════════
 app.listen(PORT, () => {
   console.log(`🚀 Server jalan di http://localhost:${PORT}`);
   console.log(`📊 Env: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🌐 Allowed CORS origins:`, allowedOrigins);
 });
-
