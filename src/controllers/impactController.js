@@ -8,6 +8,7 @@ import { validNumber } from '../utils/validator.js';
 // Total users, listings, transactions, kg saved, co2 saved, GMV
 // ═══════════════════════════════════════════════════════════
 export const getPlatformStats = async (req, res) => {
+  // ─── Query 1: platform stats (sama kayak sebelumnya) ───
   const { data, error } = await supabaseAdmin
     .from('platform_stats')
     .select('*')
@@ -18,28 +19,60 @@ export const getPlatformStats = async (req, res) => {
     throw error;
   }
 
-  // Round angka biar lebih readable di UI
   const rounded = {
-    total_users: Number(data.total_users) || 0,
-    total_listings: Number(data.total_listings) || 0,
+    total_users:        Number(data.total_users)        || 0,
+    total_listings:     Number(data.total_listings)     || 0,
     total_transactions: Number(data.total_transactions) || 0,
-    total_kg_saved: Math.round(Number(data.total_kg_saved) || 0),
-    total_co2_saved: Math.round(Number(data.total_co2_saved) || 0),
-    total_gmv: Math.round(Number(data.total_gmv) || 0),
+    total_kg_saved:     Math.round(Number(data.total_kg_saved)  || 0),
+    total_co2_saved:    Math.round(Number(data.total_co2_saved) || 0),
+    total_gmv:          Math.round(Number(data.total_gmv)       || 0),
   };
 
-  // Bonus calculations buat narrative angka yang impressive
-  // Source: EPA — 1 kg CO2e ≈ 4.6 km drive passenger car
   const equivalentCarKm = Math.round(rounded.total_co2_saved * 4.6);
-  // Source: 1 tree absorbs ~21 kg CO2/year
   const equivalentTrees = Math.round(rounded.total_co2_saved / 21);
+
+  // ─── Query 2: CO2 breakdown per category dari transaksi COMPLETED ───
+  const { data: txData, error: txError } = await supabaseAdmin
+    .from('transactions')
+    .select(`
+      co2_saved,
+      listing:listings!transactions_listing_id_fkey (
+        category:categories!listings_category_id_fkey (
+          name
+        )
+      )
+    `)
+    .eq('status', 'COMPLETED')
+    .gt('co2_saved', 0);
+
+  // Kalo query breakdown gagal, tetap return stats tanpa breakdown
+  let breakdown = [];
+  if (!txError && txData) {
+    // Group by category name, sum co2_saved
+    const grouped = {};
+    txData.forEach(tx => {
+      const catName = tx.listing?.category?.name || 'Other';
+      grouped[catName] = (grouped[catName] || 0) + Number(tx.co2_saved);
+    });
+
+    const total = rounded.total_co2_saved || 1; // hindari division by zero
+    breakdown = Object.entries(grouped)
+  .map(([category, co2_saved]) => ({
+    category,
+    co2_saved: Math.round(co2_saved * 10) / 10, // 1 desimal, bukan integer
+    percentage: Math.round((co2_saved / total) * 1000) / 10,
+  }))
+  .filter(item => item.co2_saved > 0) // filter setelah sum
+  .sort((a, b) => b.co2_saved - a.co2_saved)
+  }
 
   res.json({
     stats: rounded,
     equivalents: {
-      car_km_avoided: equivalentCarKm,
+      car_km_avoided:         equivalentCarKm,
       trees_planted_equivalent: equivalentTrees,
     },
+    breakdown, // [] kalau belum ada transaksi COMPLETED
   });
 };
 
@@ -113,7 +146,7 @@ export const getLeaderboard = async (req, res) => {
   const { data, error } = await supabaseAdmin
     .from('user_impact')
     .select('user_id, full_name, total_co2_saved, sales_count, purchase_count')
-    .gt('total_co2_saved', 0) // exclude user 0 impact
+    .gt('co2_saved', 0) // exclude user 0 impact
     .order('total_co2_saved', { ascending: false })
     .limit(limitNum);
 
